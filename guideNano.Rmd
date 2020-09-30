@@ -1,0 +1,607 @@
+---
+title: "R Notebook for the GuideNano similarity tool"
+output: html_notebook
+---
+------
+
+Read-in file by Park et al. 2018, GuideNano tool, and produce pairwise similarity table. Reproducing the paper and using the data set they use, i.e. a 6x4 table (6 desciptors and 4 TiO2 materials), to produce a 7x3 similarity score table (6x3) and an overall similarity score 1x3. The first material  is the reference material the other 3 are compared against. 
+
+Two additional columns are added by Ma-Hock et al. 2009 paper, same as 2nd NM from the original Park dataset. The two columns were probably not include by Park et al. bcausee thy refer to two extra concentrations where the only alteration between the three is for 'aggregate size'.
+
+For ease of calculations we assume that users will upload datasets with the exact same format and the first column includes the reference material's properties.
+
+The workflow follows:
+a. Read-in the data saves as 'inan_a_1465142_sm0462.csv' and plot descriptors 
+
+```{r}
+library(renm)
+substances <- listSubstances(
+    service="http://data.enanomapper.net/",
+    search="http://dx.doi.org/10.6084/m9.figshare.4141593.v1", type="citation"
+  )
+#bundles1 <- listBundles("https://data.enanomapper.net/bundle/00000000-0000-0000-0000-000000000001")
+bundles = listBundles("http://data.enanomapper.net/")
+substances = listSubstances("http://data.enanomapper.net/")
+substanceFields = names(substances$substance)
+substanceLabels = substances$substance["name"]
+info = substanceInfo("http://data.enanomapper.net/substance/NWKI-71060af4-1613-35cf-95ee-2a039be0388a")
+experiments = info$protocol
+info$effects
+
+
+in.chart<- substances$substance
+rm(data.len,data.all)
+#data.type<- character(1)
+data.len<- numeric(1)
+data.all<- matrix(0,nrow(in.chart),600)
+for(i in 1:200){#nrow(in.chart)){
+  sub.in<- as.character(in.chart[i,1])
+  info.in<- substanceInfo(sub.in)
+  data.in<- unlist(info.in$effects)#[[1]]$result)
+  print(length(data.in))
+  data.all[i,1:length(data.in)]<- data.in[1:length(data.in)]
+  #data.all<- rbind(data.all,data.in)
+  #data.type<- c(data.type,info.in$parameters[[2]])
+  data.len<- c(data.len,length(info.in$effects))
+
+}
+
+gn.data<- read.csv('inan_a_1465142_sm0462.csv',header=T,row.names=1,sep=',',colClasses = 'character')
+gn.data
+dim(gn.data)
+##
+#One inhalation study by Oberdorster, Ferin, and Lehnert (1994) using fine (TiO2-F) and ultrafine TiO2 (TiO2-UF), and one by Ma-Hock et al. (2009) studying TiO2 nanoparticles (TiO2-M) at three different concentrations, of which we will use the properties reported for the lowest test concentration (2mg/m3).
+#TiO2.case== control by Ma-Hock et al. (2009), i.e. exposed to ) aerosol
+#(TiO2-M)==TiO2.M2 (xposed to 2mg/m3 aerosol), TiO2.M10 (exposed to 10mg/m3 aerosol), TiO2.M50 (exposed to 50mg/m3 aerosol)
+####
+#
+# IMPOrtANT!
+# All measurements are calculated with respect to control 
+######
+#another chunck for nanoreg1 data
+substances = listSubstances("https://apps.ideaconsult.net/nanoreg1/")
+in.chart<- substances$substance
+in.chart$substanceType #check how many nanomaterials
+uni1<- table(in.chart$substanceType) #group and count how many unique nanomaterials
+uni1.names<- names(uni1)
+
+rm(data.len,data.all)
+data.len<- numeric(1)
+data.all<- array(0,dim=c(nrow(in.chart),1200,length(uni1)))
+# different entries in the db - 1200 adequate number for all numerical values/ units/ notes - unique nanomaterial
+#,dimnames = list(NULL,NULL,c('nm','items','data')))
+#data.all<- matrix(0,nrow(in.chart),600)
+
+for(i in 1:length(uni1)){
+  sub.type<- which(in.chart$substanceType==uni1.names[i])
+  sub.data<- in.chart[sub.type,]
+  for(j in 1:nrow(sub.data)){#in.chart)){
+    sub.in<- as.character(sub.data[j,1])
+    #info.in<- substanceInfo(sub.in)
+    #~
+    handle = new_handle()
+    url1 = paste(sub.in, "/study", sep = "")
+    res1 <- curl::curl_fetch_memory(url1, handle)
+    txt1<- rawToChar(res1$content)
+    data1<- fromJSON(txt1, simplifyVector = F)$study
+    #~
+    if(length(data1)!=0){
+      data1<- data1[[1]]
+      data.in<- unlist(data1$effects)#[[1]]$result)
+      print(length(data.in))
+      data.all[j,1:length(data.in),i]<- data.in[1:length(data.in)]
+      #data.all<- rbind(data.all,data.in)
+      #data.type<- c(data.type,info.in$parameters[[2]])
+    }
+    data.len<- c(data.len,length(data1$effects))
+  }
+  print(c(i,j))
+}
+
+
+```
+
+b. Continue with defining functions per descriptor exactly as in Park et al. 2018. 
+Chemical composiion similarity score:
+
+
+```{r}
+
+chem.sim<- function(x){
+  test1<- x[1,]==x[1,1]
+  chem.sim.array<- rep(0,length(x))
+  chem.sim.array[test1==TRUE]<- 1
+
+  return(chem.sim.array[2:length(x)])
+}
+
+chem.sim(gn.data[1,])
+```
+
+Needs fine tuning for the actual values included, paper says that 1 get not only pure materials.
+
+c. Chemical crystaline form function:
+```{r}
+
+library(tidyverse)
+library(stringr)
+
+chem.crys<- function(x){
+  x<- as.character(x)
+  test1<- strsplit(strsplit(x[1],"[0-9]+")[[1]][2],'% ')
+  test1<- tail(test1[[1]],n=1L)
+  test.n<- as.numeric(str_extract_all(x[1],"[0-9]+")[[1]])
+  
+  test.in<- lapply(x[2:length(x)],function(x){strsplit(x,test1)[[1]]})
+  test.in<- lapply(test.in,function(x){strsplit(x,' ')[[1]]})
+  test.f<- vapply(test.in, tail, n = 1L, FUN.VALUE = character(1))
+  test.f<- as.numeric(unlist(strsplit(test.f,'%')))
+  
+  return(test.f/100)
+}
+
+chem.crys(gn.data[2,])
+```
+
+d. Primary size function:
+```{r}
+library(tidyverse)
+library(stringr)
+library(EnvStats)
+
+chem.c<- gn.data[4,]
+
+chem.prime<- function(x){
+  test.in<- str_extract_all(x, "\\-*\\d+\\.*\\d*")
+  w<- 1
+  p.vec<- seq(0.1,0.9,0.1)
+  p.mat<- matrix(0,length(p.vec),length(x))
+  while(w<=length(test.in)){
+    test.in1<- as.numeric(test.in[[w]])
+    p.in1<- qnorm(p.vec,test.in1[1],test.in1[2])
+    p.mat[,w]<- p.in1
+    w<- w+1
+  }
+  
+  ratio1<- apply(p.mat,2,function(x){pmin(p.mat[,1],x)})
+  ratio2<- apply(p.mat,2,function(x){pmax(p.mat[,1],x)})
+  ratio.all<- ratio1/ratio2
+  ratio.all<- ratio.all[,-1]
+  
+  prime<- apply(ratio.all,2,EnvStats::geoMean)
+  
+  return(prime)
+}
+
+chem.prime(gn.data[4,])
+```
+
+Note: it waits the exact same format, i.e. a string with two numbers, the first being the mean value of the normal ditribution and the second one the standard deviation of the normal distribution. 
+
+e. Aggregate size function (same as primary size only working with the standard normal distribution):
+
+```{r}
+library(tidyverse)
+library(stringr)
+library(EnvStats)
+
+chem.c<- gn.data[5,]
+
+chem.agg<- function(x){
+  test.in<- str_extract_all(x, "\\-*\\d+\\.*\\d*")
+  w<- 1
+  p.vec<- seq(0.1,0.9,0.1)
+  p.mat<- matrix(0,length(p.vec),length(x))
+  while(w<=length(test.in)){
+    test.in1<- as.numeric(test.in[[w]])
+    test.in1[1]<- test.in1[1]*1000 # tranform to nm 
+    test.in2<- log(test.in1)
+    if(length(test.in2)<2){test.in2[2][is.na(test.in2[2])] <- 0}
+    p.in2<- qnorm(p.vec,test.in2[1],test.in2[2])
+    p.in1<- exp(p.in2)
+    p.mat[,w]<- p.in1
+    w<- w+1
+    
+  }
+  
+  ratio1<- apply(p.mat,2,function(x){pmin(p.mat[,1],x)})
+  ratio2<- apply(p.mat,2,function(x){pmax(p.mat[,1],x)})
+  ratio.all<- ratio1/ratio2
+  ratio.all<- ratio.all[,-1]
+  
+  aggr<- apply(ratio.all,2,EnvStats::geoMean)
+  
+  return(aggr)
+}
+
+chem.agg(gn.data[5,])
+```
+
+f. Density similarity score:
+```{r}
+library(tidyverse)
+library(stringr)
+
+chem.c<- gn.data[3,]
+
+chem.dens<- function(x){
+  test.in<- str_extract_all(x, "\\-*\\d+\\.*\\d*")
+  
+  w<- 1
+  p.vec<- numeric(length(x))
+  while(w<=length(x)){
+    test.in1<- as.numeric(test.in[[w]])[1]
+    p.vec[w]<- test.in1
+    w<- w+1
+  }
+  
+  ratio1<- as.numeric(pmin(p.vec[1],p.vec))
+  ratio2<- as.numeric(pmax(p.vec[1],p.vec))
+  ratio.all<- ratio1/ratio2
+  ratio.all<- ratio.all[-1]
+  
+  dens<- ratio.all
+  
+  return(dens)
+  
+}
+chem.dens(gn.data[3,])
+```
+
+g. Shape similarity score:
+```{r}
+library(tidyverse)
+library(stringr)
+
+chem.c<- gn.data[6,]
+
+chem.shape<- function(x){
+  x<- apply(x,2,tolower)
+  
+  onto1<- c('spheres','cubes','platelets','flakes')
+  onto2<- c(1,1,2,2)# translate onto1 to categories (see onto3)
+  onto3<- c('cat1','cat2','cat3')# cat1: 3D, cat2: 2D, cat3: 1D
+
+  test.in<- str_extract(x, "[a-z]{1,3}")#3 first *small* letters of the word
+  test.in.onto<- str_extract(onto1, "[a-z]{1,3}")
+  w<- 1
+  p.vec<- numeric(length(x))
+  while(w<=length(x)){
+    test.in1<- which(test.in[w] %in% test.in.onto)
+    if(length(test.in1)!=0){p.vec[w]<- onto2[test.in1]}else{p.vec[w]<- 3}
+    w<- w+1
+  }
+  
+  p.vec.ind<- expand.grid(p.vec[1], p.vec)
+  p.shape.mat<- matrix(c(1,0.5,0,0,0.5,0.5,1,0,0,0.8,0,0,1,0.5,0,0,0,0.5,1,0,0.5,0.8,0,0,1),5,5)
+  
+  k<-1
+  shape.vec<- numeric(nrow(p.vec.ind))
+  while(k<=nrow(p.vec.ind)){
+    shape.vec[k]<- p.shape.mat[p.vec.ind[k,1],p.vec.ind[k,2]]
+    k<- k+1
+  }  
+  shape.vec<- shape.vec[-1]
+  
+  return(shape.vec)
+  
+}
+
+chem.shape(gn.data[6,])
+```
+
+e. Combine all to a single function called chem.gn.sim()- input the whole matrix with the specific format:
+
+```{r}
+library(tidyverse)
+library(stringr)
+library(EnvStats)
+
+chem.gn.sim<- function(x.mat,ind=c('Aggregate size','Chemical composition','Crystalline form','Density','Primary size','Shape')){
+  
+  x.mat<- x.mat[order(rownames(x.mat)),]
+  
+  x.return<- matrix(0,nrow(x.mat)+1,ncol(x.mat)-1)
+  
+  x.return[1,]<- chem.agg(x.mat[1,])
+  x.return[2,]<- chem.sim(x.mat[2,])
+  x.return[3,]<- chem.crys(x.mat[3,])
+  x.return[4,]<- chem.dens(x.mat[4,])
+  x.return[5,]<- chem.prime(x.mat[5,])
+  x.return[6,]<- chem.shape(x.mat[6,])
+  
+  x.return[7,]<- apply(x.return[1:6,],2,min)
+  
+  colnames(x.return)<- colnames(x.mat[2:ncol(x.mat)])
+  rownames(x.return)<- c(rownames(x.mat),'Overall')
+  return(x.return)
+}
+
+
+```
+
+See results!
+```{r}
+library(tidyverse)
+library(stringr)
+library(EnvStats)
+library("d3heatmap")
+
+sim.mat<- chem.gn.sim(gn.data)
+
+d3heatmap(scale(sim.mat), colors = "RdYlBu",
+          k_row = 4, # Number of groups in rows
+          k_col = 2, # Number of groups in columns
+          xaxis_font_size='10px',yaxis_font_size = '10px'
+          )
+#https://www.datanovia.com/en/lessons/heatmap-in-r-static-and-interactive-visualization/
+```
+
+A shiny app
+
+```{r}
+library(d3heatmap)
+library(shiny)
+
+ui <- fluidPage(
+  h1("Similarity heatmap"),
+  selectInput("palette", "Palette", c("YlOrRd", "RdYlBu", "Greens", "Blues")),
+  checkboxInput("cluster", "Apply clustering"),
+  d3heatmapOutput("heatmap")
+)
+
+server <- function(input, output, session) {
+  output$heatmap <- renderD3heatmap({
+    d3heatmap(scale(sim.mat), #colors = "RdYlBu",
+          k_row = 4, # Number of groups in rows
+          k_col = 2, # Number of groups in columns
+          xaxis_font_size='10px',yaxis_font_size = '10px'
+          )
+  })
+}
+
+shinyApp(ui, server)
+
+  
+
+```
+
+
+Create extra data (10 extra nms) because of the limited sample size & apply classification methodologies.
+
+Classification options:
+
+```{r}
+sim.mat.boot.M<- matrix(1,nrow(sim.mat),10)
+sim.mat.boot.F<- matrix(1,nrow(sim.mat),10)
+set.seed(1001)
+for(j in 1:6){ 
+  sim.mat.boot.M[j,1:10]<- abs(runif(10,min(sim.mat[j,c(1,4:5)])-0.1,max(sim.mat[j,c(1,4:5)])+0.1))
+
+    sim.mat.boot.F[j,1:10]<- abs(runif(10,min(sim.mat[j,c(2:3)])-0.1,max(sim.mat[j,c(2:3)])+0.1))  
+}
+
+sim.mat.boot<- cbind(sim.mat.boot.M,sim.mat.boot.F)
+#last row- overall measure which is the min of the rest!!!
+sim.mat.boot[7,]<- apply(sim.mat.boot[1:6,],2,min) 
+
+rownames(sim.mat.boot)<- rownames(sim.mat)
+sim.mat.boot.class<- c(rep('M',10),rep('F',10))
+
+d3heatmap(scale(sim.mat.boot), colors = "RdYlBu",
+          k_row = 4, # Number of groups in rows
+          k_col = 2, # Number of groups in columns
+          xaxis_font_size='10px',yaxis_font_size = '10px'
+          )
+
+
+#https://cran.r-project.org/web/packages/caret/vignettes/caret.html
+
+sim.mat.boot1<- cbind(t(sim.mat.boot),sim.mat.boot.class)
+colnames(sim.mat.boot1)[8]<- 'Class'
+sim.mat.boot1<- as.data.frame(sim.mat.boot1)
+#20 NPs x 7 scores & Class
+
+
+
+library(caret)
+set.seed(107)
+inTrain <- createDataPartition(
+  y = sim.mat.boot1$Class,
+  ## the outcome data are needed
+  p = .75,
+  ## The percentage of data in the
+  ## training set
+  list = FALSE
+)
+## The format of the results
+
+## The output is a set of integers for the rows of Sonar
+## that belong in the training set.
+str(inTrain)
+training <- sim.mat.boot1[inTrain,]
+testing  <- sim.mat.boot1[-inTrain,]
+
+nrow(training)
+nrow(testing)
+plsFit <- train(
+  Class ~ .,
+  data = training,
+  method = "pls",
+  ## Center and scale the predictors for the training
+  ## set and all future samples.
+  #preProc = c("center", "scale")
+)
+
+ctrl <- trainControl(
+  method = "repeatedcv", 
+  repeats = 3,
+  classProbs = TRUE, 
+  summaryFunction = twoClassSummary
+)
+
+set.seed(123)
+plsFit <- train(
+  Class ~ .,
+  data = training,
+  method = "pls",
+  #preProc = c("center", "scale"),
+  tuneLength = 15,
+  trControl = ctrl,
+  metric = "ROC"
+)
+plsFit
+
+#plot
+ggplot(plsFit)
+
+#prediction
+plsClasses <- predict(plsFit, newdata = testing)
+str(plsClasses)
+confusionMatrix(data = plsClasses, testing$Class)
+
+###
+#
+# another model
+rdaGrid = data.frame(gamma = (0:4)/4, lambda = 3/4)
+set.seed(123)
+rdaFit <- train(
+  Class ~ .,
+  data = training,
+  method = "rda",
+  tuneGrid = rdaGrid,
+  trControl = ctrl,
+  metric = "ROC"
+)
+rdaFit
+rdaClasses <- predict(rdaFit, newdata = testing)
+confusionMatrix(rdaClasses, testing$Class)
+
+resamps <- resamples(list(pls = plsFit, rda = rdaFit))
+summary(resamps)
+
+xyplot(resamps, what = "BlandAltman")
+
+diffs <- diff(resamps)
+summary(diffs)
+
+
+
+```
+
+Clustering:
+
+```{r}
+#http://www.di.fc.ul.pt/~jpn/r/clustering/clustering.html
+
+library(stats)
+set.seed(101)
+km <- kmeans(t(sim.mat.boot), 2)
+
+plot(sim.mat.boot[1,], sim.mat.boot[2,], col=km$cluster)
+points(km$centers[,c(1,2)], col=1:3, pch=19, cex=2)
+
+set.seed(101)
+sampleiris <- iris[sample(1:150, 40),] # get samples from iris dataset
+# each observation has 4 variables, ie, they are interpreted as 4-D points
+distance   <- dist(sampleiris[,-5], method="euclidean") 
+cluster    <- hclust(distance, method="average")
+plot(cluster, hang=-1, label=sampleiris$Species)
+
+#horizontal
+plot(as.dendrogram(cluster), edgePar=list(col="darkgreen", lwd=2), horiz=T) 
+
+#as text
+str(as.dendrogram(cluster))
+
+#fuzzy means
+library(e1071)
+result <- cmeans(iris[,-5], centers=3, iter.max=100, m=2, method="cmeans")  # 3 clusters
+plot(iris[,1], iris[,2], col=result$cluster)
+points(result$centers[,c(1,2)], col=1:3, pch=19, cex=2)
+result$membership[1:5,]
+table(iris$Species, result$cluster)
+
+#multi-gaussian EM alg
+library(mclust)
+mc <- Mclust(iris[,1:4], 3)
+summary(mc)
+plot(mc, what=c("classification"), dimens=c(1,2))
+
+plot(mc, what=c("classification"), dimens=c(3,4))
+
+table(iris$Species, mc$classification)
+
+#
+library(fpc)
+set.seed(121)
+sampleiris <- iris[sample(1:150, 40),] # get samples from iris dataset
+# eps is radius of neighborhood, MinPts is no of neighbors within eps
+cluster <- dbscan(sampleiris[,-5], eps=0.6, MinPts=4)
+# black points are outliers, triangles are core points and circles are boundary points
+plot(cluster, sampleiris)
+plot(cluster, sampleiris[,c(1,4)])
+
+# QT clustering
+library(flexclust) 
+cl1 <- qtclust(iris[,-5], radius=2) # Uses 2 as the maximum distance of the points to the cluster centers.
+cl2 <- qtclust(iris[,-5], radius=1) # Uses 1 as the maximum distance of the points to the cluster centers.
+par(mfrow=c(1,2))
+plot(iris[,c(1,2)], col=predict(cl1), xlab="", ylab="")
+plot(iris[,c(1,2)], col=predict(cl2), xlab="", ylab="")
+
+par(mfrow=c(1,1))
+table(attributes(cl1)$cluster, iris$Species) # not v
+
+
+#SOM
+library(kohonen) 
+set.seed(101)
+train.obs <- sample(nrow(iris), 50) # get the training set observations
+train.set <- scale(iris[train.obs,][,-5]) # check info about scaling data below
+test.set  <- scale(iris[-train.obs, ][-5],
+               center = attr(train.set, "scaled:center"),
+               scale  = attr(train.set, "scaled:scale"))
+som.iris <- som(train.set, grid = somgrid(5, 5, "hexagonal"))
+plot(som.iris)
+
+som.prediction <- 
+  predict(som.iris, newdata = test.set,
+          trainX = train.set,
+          trainY = classvec2classmat(iris[,5][train.obs]))
+
+table(iris[,5][-train.obs], som.prediction$prediction)
+
+#knn
+library(kknn)
+library(caret)
+inTrain   <- createDataPartition(y=iris$Species, p=0.75, list=FALSE) 
+known.set <- iris[inTrain,]
+test.set  <- iris[-inTrain,]
+
+iris.kknn <- kknn(Species ~ ., known.set, test.set[,-5], 
+                  distance = 1, k = 7, scale = TRUE,
+                  kernel = "triangular") 
+# the kernel param specifies how to weight the neighbors according to their distances 
+# kernel = "rectangular" does not weight (check help for more options)
+
+#here are some useful information from the returned object:
+iris.kknn$prob[10:20,]
+
+iris.kknn$fitted.values
+table(test.set$Species, fitted(iris.kknn))
+
+#knn- cv
+set.seed(101)
+# 10-fol cross validation with k=7 neighbors
+iris.cv <- cv.kknn(Species ~ ., iris, kcv=10, kernel="triangular")
+iris.cv # 6% 
+
+iris.cv2 <- train.kknn(Species ~ ., iris, nn=10, kernel="triangular")
+plot(iris.cv2, type="b")
+
+
+
+```
+
+
